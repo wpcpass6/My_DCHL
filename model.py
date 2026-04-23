@@ -1,14 +1,3 @@
-# coding=utf-8
-"""
-H-DCHL-B 模型定义。
-
-设计思想：
-1. 延续 DCHL 的多分支结构风格；
-2. 将原本的地理分支替换为 Region 异构语义分支；
-3. 新增 Category 异构语义分支；
-4. 第一版仅比较结构增益，因此不包含对比学习与掩码训练。
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -94,7 +83,7 @@ class DirectedHyperConvNetwork(nn.Module):
 
 class HDCHLB(nn.Module):
     """
-    H-DCHL-B 主模型。
+    主模型。
 
     分支说明：
     - collaborative branch: User-POI 长期协同

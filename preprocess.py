@@ -1,23 +1,10 @@
-# coding=utf-8
-"""
-将 TSMC2014 原始数据预处理为 H-DCHL-B 可直接读取的格式。
-
-当前版本遵循以下设计：
-1. 延续 DCHL 的 train/test 文件结构，方便训练入口复用；
-2. 额外输出 POI-Region、POI-Category 两类异构语义映射；
-3. 先支持 TKY/NYC 两类 TSMC2014 原始文件。
-"""
-
 import argparse
 import datetime as dt
 import os
 from collections import defaultdict
-
 from utils import save_dict_to_pkl, save_list_with_pkl
 
-
 _GEOHASH_BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
-
 
 def geohash_encode(latitude, longitude, precision=6):
     """使用纯 Python 实现 geohash 编码，避免额外依赖。"""
@@ -53,14 +40,12 @@ def geohash_encode(latitude, longitude, precision=6):
             ch = 0
     return "".join(geohash_chars)
 
-
-def parse_time(timestr):
-    """解析 TSMC2014 原始时间字段。"""
+"""解析 TSMC2014 原始时间字段。"""
+def parse_time(timestr):  
     return dt.datetime.strptime(timestr, "%a %b %d %H:%M:%S %z %Y")
 
-
+"""读取原始事件，并按用户聚合。"""
 def load_raw_events(raw_path):
-    """读取原始事件，并按用户聚合。"""
     user_events = defaultdict(list)
     poi_users = defaultdict(set)
     poi_coos_raw = {}
@@ -85,9 +70,8 @@ def load_raw_events(raw_path):
 
     return user_events, poi_users, poi_coos_raw, poi_cat_raw
 
-
+"""按 24 小时时间窗切分 session，并过滤过短 session。"""
 def build_sessions(user_events, keep_poi_set, session_gap_hours=24, min_session_len=3):
-    """按 24 小时时间窗切分 session，并过滤过短 session。"""
     split_delta = dt.timedelta(hours=session_gap_hours)
     user_sessions = {}
     for user_id, events in user_events.items():
@@ -111,9 +95,8 @@ def build_sessions(user_events, keep_poi_set, session_gap_hours=24, min_session_
             user_sessions[user_id] = valid_sessions
     return user_sessions
 
-
+"""按用户时间顺序切8/2切分训练集测试集"""
 def split_users_sessions(user_sessions_raw, train_ratio=0.8, min_user_sessions=3):
-    """按用户时间顺序切 session：训练滑窗，测试留一。"""
     valid_users = []
     train_user_sessions_raw = {}
     test_user_sessions_raw = {}
@@ -123,11 +106,13 @@ def split_users_sessions(user_sessions_raw, train_ratio=0.8, min_user_sessions=3
     for uid, sessions in user_sessions_raw.items():
         if len(sessions) < min_user_sessions:
             continue
+
         train_cut = max(1, int(len(sessions) * train_ratio))
         if train_cut >= len(sessions):
             train_cut = len(sessions) - 1
         train_raw = sessions[:train_cut]
         test_raw = sessions[train_cut:]
+        
         if len(train_raw) < 1 or len(test_raw) < 1:
             continue
         valid_users.append(uid)
@@ -138,9 +123,8 @@ def split_users_sessions(user_sessions_raw, train_ratio=0.8, min_user_sessions=3
 
     return valid_users, train_user_sessions_raw, test_user_sessions_raw, total_train_sessions, total_test_sessions
 
-
+"""统一 remap 用户、POI、类别和区域索引。"""
 def build_entity_mappings(valid_users, user_sessions_raw, poi_coos_raw, poi_cat_raw, geohash_precision=6):
-    """统一 remap 用户、POI、类别和区域索引。"""
     poi_set = set()
     for uid in valid_users:
         for session in user_sessions_raw[uid]:
@@ -177,7 +161,7 @@ def remap_sessions_for_users(user_ids, user_sessions_raw, user2idx, poi2idx):
 
 
 def build_prefix_samples(remapped_sessions, poi_cat_idx, poi_region_idx):
-    """训练阶段：将每个 session 展开为 prefix -> next POI。"""
+    """训练阶段：滑窗，将每个 session 展开为 prefix -> next POI。"""
     samples = []
     for user_idx, sessions in remapped_sessions.items():
         for session_idx, session in enumerate(sessions):
@@ -191,6 +175,25 @@ def build_prefix_samples(remapped_sessions, poi_cat_idx, poi_region_idx):
                     "label_category": poi_cat_idx[label_poi],
                     "label_region": poi_region_idx[label_poi],
                 })
+    return samples
+
+
+def build_train_last_step_samples(remapped_sessions, poi_cat_idx, poi_region_idx):
+    """训练阶段：留一，每个 session 仅保留最后一步样本。"""
+    samples = []
+    for user_idx, sessions in remapped_sessions.items():
+        for session_idx, session in enumerate(sessions):
+            if len(session) < 2:
+                continue
+            label_poi = session[-1]
+            samples.append({
+                "user_idx": user_idx,
+                "session_idx": session_idx,
+                "prefix_pois": session[:-1],
+                "label_poi": label_poi,
+                "label_category": poi_cat_idx[label_poi],
+                "label_region": poi_region_idx[label_poi],
+            })
     return samples
 
 
@@ -231,25 +234,6 @@ def summarize_sessions(user_sessions_dict):
     avg_session_len = (checkin_count / session_count) if session_count > 0 else 0.0
     return user_count, session_count, checkin_count, avg_sessions_per_user, avg_session_len
 
-
-def summarize_mapping_distribution(mapping_dict):
-    """统计 POI->语义节点 映射分布，便于填写类别/区域静态映射图表。"""
-    semantic_counts = defaultdict(int)
-    for _, semantic_idx in mapping_dict.items():
-        semantic_counts[semantic_idx] += 1
-
-    if not semantic_counts:
-        return 0.0, 0, 0, []
-
-    counts = list(semantic_counts.values())
-    avg_count = sum(counts) / len(counts)
-    max_count = max(counts)
-    min_count = min(counts)
-    # 记录 Top5 的语义节点规模，便于后续手工画分布图。
-    top5 = sorted(semantic_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-    return avg_count, max_count, min_count, top5
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--raw_path", type=str, default="datasets/dataset_TSMC2014_TKY.txt")
@@ -267,7 +251,7 @@ def main():
     print("[1/5] 读取原始数据...")
     user_events, poi_users, poi_coos_raw, poi_cat_raw = load_raw_events(args.raw_path)
 
-    # -------- 图表一-组A：过滤前原始数据规模 --------
+    # --------过滤前原始数据规模 --------
     raw_users, raw_checkins, raw_pois, _ = summarize_user_events(user_events, poi_users, poi_cat_raw)
     print(
         "[FIG1-A][过滤前原始] 用户数=%d，POI数=%d，签到记录数=%d"
@@ -283,14 +267,14 @@ def main():
         min_session_len=args.min_session_len,
     )
 
-    print("[3/5] 用户内按时间做 session 切分...")
+    print("[3/5] 用户内按时间划分训练集测试集...")
     valid_users, train_user_sessions_raw, test_user_sessions_raw, total_train_sessions, total_test_sessions = split_users_sessions(
         user_sessions_raw,
         train_ratio=args.train_ratio,
         min_user_sessions=args.min_user_sessions,
     )
 
-    # -------- 图表一-组B中间量：完整预处理后（含 min_user_sessions 约束）的统计 --------
+    # 完整预处理后的统计
     final_user_sessions_raw = {uid: user_sessions_raw[uid] for uid in valid_users}
     final_users, final_sessions, final_checkins, _, _ = summarize_sessions(final_user_sessions_raw)
     final_pois = len({event[1] for sessions in final_user_sessions_raw.values() for session in sessions for event in session})
@@ -303,22 +287,22 @@ def main():
         geohash_precision=args.geohash_precision,
     )
 
-    # -------- 图表二：仅保留核心两项（类别节点数、区域节点数） --------
-    print(
-        "[FIG2][节点规模] 类别节点数量=%d，区域节点数量=%d"
-        % (num_categories, num_regions)
-    )
+    print("[节点规模] 类别节点数量=%d，区域节点数量=%d" % (num_categories, num_regions))
 
     train_user_sessions = remap_sessions_for_users(valid_users, train_user_sessions_raw, user2idx, poi2idx)
     test_user_sessions = remap_sessions_for_users(valid_users, test_user_sessions_raw, user2idx, poi2idx)
 
-    print("[4/5] 生成训练滑窗与测试留一样本...")
-    train_samples = build_prefix_samples(train_user_sessions, poi_cat_idx, poi_region_idx)
+    print("[4/5] 生成训练与测试样本...")
+    # 训练集滑窗方式
+    # train_samples = build_prefix_samples(train_user_sessions, poi_cat_idx, poi_region_idx)
+
+    # 训练集留一方式
+    train_samples = build_train_last_step_samples(train_user_sessions, poi_cat_idx, poi_region_idx)
+
     test_samples = build_last_step_samples(test_user_sessions, poi_cat_idx, poi_region_idx)
 
-    # -------- 图表一-组B：过滤后原始数据规模（含会话与样本） --------
     print(
-        "[FIG1-B][过滤后] 用户数=%d，POI数=%d，签到记录数=%d，Session数量=%d，训练样本数=%d，测试样本数=%d"
+        "[过滤后] 用户数=%d，POI数=%d，签到记录数=%d，Session数量=%d，训练样本数=%d，测试样本数=%d"
         % (final_users, final_pois, final_checkins, final_sessions, len(train_samples), len(test_samples))
     )
 
@@ -337,7 +321,7 @@ def main():
         "num_test_sessions": total_test_sessions,
         "num_train_samples": len(train_samples),
         "num_test_samples": len(test_samples),
-        "train_protocol": "all_prefixes",
+        "train_protocol": "last_step_only",
         "test_protocol": "last_step_only",
     }
 

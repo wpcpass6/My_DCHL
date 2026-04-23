@@ -88,10 +88,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="datasets/TKY")
     parser.add_argument("--meta_path", type=str, default="datasets/TKY/meta.pkl")
-    parser.add_argument("--poi_region_path", type=str, default=None,
-                        help="可选：显式指定预处理好的 poi_region.pkl；若不传，则根据 poi_coos 动态按 geohash 精度生成")
-    parser.add_argument("--region_precision", type=int, default=6,
-                        help="动态构造 Region 时使用的 geohash 精度，例如 5 或 6")
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--num_epochs", type=int, default=15)
     parser.add_argument("--batch_size", type=int, default=1024)
@@ -101,8 +97,10 @@ def main():
     parser.add_argument("--decay", type=float, default=5e-4)
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--deviceID", type=int, default=0)
+    # 构图随机删边，防止过拟合（感觉必要）
     parser.add_argument("--keep_rate", type=float, default=1.0)
     parser.add_argument("--keep_rate_poi", type=float, default=1.0)
+    
     parser.add_argument("--num_col_layers", type=int, default=2)
     parser.add_argument("--num_reg_layers", type=int, default=2)
     parser.add_argument("--num_cat_layers", type=int, default=1)
@@ -110,10 +108,10 @@ def main():
     parser.add_argument("--lr_scheduler_factor", type=float, default=0.1)
     parser.add_argument("--mask_rate_cat", type=float, default=0.2)
     parser.add_argument("--lambda_cat", type=float, default=0.05)
-    parser.add_argument("--mask_rate_reg", type=float, default=0.0)
-    parser.add_argument("--lambda_reg", type=float, default=0.0)
+    parser.add_argument("--mask_rate_reg", type=float, default=0.2)
+    parser.add_argument("--lambda_reg", type=float, default=0.05)
     parser.add_argument("--mask_alpha", type=float, default=2.0)
-    parser.add_argument("--save_dir", type=str, default="logs")
+    parser.add_argument("--save_dir", type=str, default="logs_huafen")
     args = parser.parse_args()
 
     random.seed(args.seed)

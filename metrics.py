@@ -1,5 +1,5 @@
 # coding=utf-8
-"""H-DCHL-B 评估指标。"""
+"""评估指标。"""
 
 import numpy as np
 
