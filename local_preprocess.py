@@ -1,4 +1,3 @@
-# 训练集构建静态语义
 import argparse
 import datetime as dt
 import os
@@ -6,6 +5,7 @@ from collections import defaultdict
 from utils import save_dict_to_pkl, save_list_with_pkl
 
 _GEOHASH_BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+
 
 def geohash_encode(latitude, longitude, precision=6):
     """使用纯 Python 实现 geohash 编码，避免额外依赖。"""
@@ -41,12 +41,14 @@ def geohash_encode(latitude, longitude, precision=6):
             ch = 0
     return "".join(geohash_chars)
 
-"""解析 TSMC2014 原始时间字段。"""
-def parse_time(timestr):  
+
+def parse_time(timestr):
+    """解析 TSMC2014 原始时间字段。"""
     return dt.datetime.strptime(timestr, "%a %b %d %H:%M:%S %z %Y")
 
-"""读取原始事件，并按用户聚合。"""
+
 def load_raw_events(raw_path):
+    """读取原始事件，并按用户聚合。"""
     user_events = defaultdict(list)
     poi_users = defaultdict(set)
     poi_coos_raw = {}
@@ -71,8 +73,9 @@ def load_raw_events(raw_path):
 
     return user_events, poi_users, poi_coos_raw, poi_cat_raw
 
-"""按 24 小时时间窗切分 session，并过滤过短 session。"""
+
 def build_sessions(user_events, keep_poi_set, session_gap_hours=24, min_session_len=3):
+    """按 24 小时时间窗切分 session，并过滤过短 session。"""
     split_delta = dt.timedelta(hours=session_gap_hours)
     user_sessions = {}
     for user_id, events in user_events.items():
@@ -96,8 +99,9 @@ def build_sessions(user_events, keep_poi_set, session_gap_hours=24, min_session_
             user_sessions[user_id] = valid_sessions
     return user_sessions
 
-"""按用户时间顺序切8/2切分训练集测试集"""
+
 def split_users_sessions(user_sessions_raw, train_ratio=0.8, min_user_sessions=3):
+    """按用户时间顺序切 8/2 切分训练集测试集。"""
     valid_users = []
     train_user_sessions_raw = {}
     test_user_sessions_raw = {}
@@ -113,7 +117,7 @@ def split_users_sessions(user_sessions_raw, train_ratio=0.8, min_user_sessions=3
             train_cut = len(sessions) - 1
         train_raw = sessions[:train_cut]
         test_raw = sessions[train_cut:]
-        
+
         if len(train_raw) < 1 or len(test_raw) < 1:
             continue
         valid_users.append(uid)
@@ -124,8 +128,9 @@ def split_users_sessions(user_sessions_raw, train_ratio=0.8, min_user_sessions=3
 
     return valid_users, train_user_sessions_raw, test_user_sessions_raw, total_train_sessions, total_test_sessions
 
-"""统一 remap 用户、POI、类别和区域索引。"""
+
 def build_entity_mappings(valid_users, user_sessions_raw, poi_coos_raw, poi_cat_raw, geohash_precision=6):
+    """统一 remap 用户、POI、类别和区域索引。"""
     poi_set = set()
     for uid in valid_users:
         for session in user_sessions_raw[uid]:
@@ -217,6 +222,21 @@ def build_last_step_samples(remapped_sessions, poi_cat_idx, poi_region_idx):
     return samples
 
 
+def collect_train_pois(remapped_sessions):
+    """仅收集训练 session 中出现过的 POI，用于构造训练集局部语义边。"""
+    train_poi_set = set()
+    for _, sessions in remapped_sessions.items():
+        for session in sessions:
+            for poi in session:
+                train_poi_set.add(poi)
+    return train_poi_set
+
+
+def filter_poi_semantic_mapping_by_train_pois(mapping_dict, train_poi_set):
+    """仅保留训练集 POI 的语义边，语义索引值保持全局编号不变。"""
+    return {poi: semantic_idx for poi, semantic_idx in mapping_dict.items() if poi in train_poi_set}
+
+
 def summarize_user_events(user_events, poi_users, poi_cat_raw):
     """统计原始事件规模，便于填写数据集规模表。"""
     raw_users = len(user_events)
@@ -235,6 +255,7 @@ def summarize_sessions(user_sessions_dict):
     avg_session_len = (checkin_count / session_count) if session_count > 0 else 0.0
     return user_count, session_count, checkin_count, avg_sessions_per_user, avg_session_len
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--raw_path", type=str, default="datasets/dataset_TSMC2014_TKY.txt")
@@ -252,12 +273,8 @@ def main():
     print("[1/5] 读取原始数据...")
     user_events, poi_users, poi_coos_raw, poi_cat_raw = load_raw_events(args.raw_path)
 
-    # --------过滤前原始数据规模 --------
     raw_users, raw_checkins, raw_pois, _ = summarize_user_events(user_events, poi_users, poi_cat_raw)
-    print(
-        "[FIG1-A][过滤前原始] 用户数=%d，POI数=%d，签到记录数=%d"
-        % (raw_users, raw_pois, raw_checkins)
-    )
+    print("[FIG1-A][过滤前原始] 用户数=%d，POI数=%d，签到记录数=%d" % (raw_users, raw_pois, raw_checkins))
 
     print("[2/5] 过滤低频 POI 并切分 session...")
     keep_poi_set = {poi for poi, users in poi_users.items() if len(users) >= args.min_poi_users}
@@ -275,7 +292,6 @@ def main():
         min_user_sessions=args.min_user_sessions,
     )
 
-    # 完整预处理后的统计
     final_user_sessions_raw = {uid: user_sessions_raw[uid] for uid in valid_users}
     final_users, final_sessions, final_checkins, _, _ = summarize_sessions(final_user_sessions_raw)
     final_pois = len({event[1] for sessions in final_user_sessions_raw.values() for session in sessions for event in session})
@@ -293,13 +309,18 @@ def main():
     train_user_sessions = remap_sessions_for_users(valid_users, train_user_sessions_raw, user2idx, poi2idx)
     test_user_sessions = remap_sessions_for_users(valid_users, test_user_sessions_raw, user2idx, poi2idx)
 
+    # ===== 与 preprocess.py 的不同部分 1：只保留训练集 POI 的类别边/区域边 =====
+    # 说明：这里仍然保留全局 num_categories 和 num_regions，只裁剪 POI->语义节点的边。
+    train_poi_set = collect_train_pois(train_user_sessions)
+    local_poi_cat_idx = filter_poi_semantic_mapping_by_train_pois(poi_cat_idx, train_poi_set)
+    local_poi_region_idx = filter_poi_semantic_mapping_by_train_pois(poi_region_idx, train_poi_set)
+
     print("[4/5] 生成训练与测试样本...")
     # 训练集滑窗方式
     # train_samples = build_prefix_samples(train_user_sessions, poi_cat_idx, poi_region_idx)
 
     # 训练集留一方式
     train_samples = build_train_last_step_samples(train_user_sessions, poi_cat_idx, poi_region_idx)
-
     test_samples = build_last_step_samples(test_user_sessions, poi_cat_idx, poi_region_idx)
 
     print(
@@ -324,6 +345,8 @@ def main():
         "num_test_samples": len(test_samples),
         "train_protocol": "last_step_only",
         "test_protocol": "last_step_only",
+        # ===== 与 preprocess.py 的不同部分 2：明确记录语义图构造口径 =====
+        "semantic_graph_protocol": "train_poi_only_edges",
     }
 
     print("[5/5] 保存文件...")
@@ -332,8 +355,11 @@ def main():
     save_dict_to_pkl(os.path.join(args.output_dir, "train_user_sessions.pkl"), train_user_sessions)
     save_dict_to_pkl(os.path.join(args.output_dir, "test_user_sessions.pkl"), test_user_sessions)
     save_dict_to_pkl(os.path.join(args.output_dir, "poi_coos.pkl"), poi_coos_idx)
-    save_dict_to_pkl(os.path.join(args.output_dir, "poi_category.pkl"), poi_cat_idx)
-    save_dict_to_pkl(os.path.join(args.output_dir, "poi_region.pkl"), poi_region_idx)
+
+    # ===== 与 preprocess.py 的不同部分 3：输出同名文件，但内容改为训练集局部语义边 =====
+    save_dict_to_pkl(os.path.join(args.output_dir, "poi_category.pkl"), local_poi_cat_idx)
+    save_dict_to_pkl(os.path.join(args.output_dir, "poi_region.pkl"), local_poi_region_idx)
+
     save_dict_to_pkl(os.path.join(args.output_dir, "meta.pkl"), meta)
     print("预处理完成：", meta)
 
