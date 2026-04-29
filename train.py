@@ -111,7 +111,7 @@ def main():
     parser.add_argument("--mask_rate_reg", type=float, default=0.2)
     parser.add_argument("--lambda_reg", type=float, default=0.05)
     parser.add_argument("--mask_alpha", type=float, default=2.0)
-    parser.add_argument("--save_dir", type=str, default="logs_graph_CR")
+    parser.add_argument("--save_dir", type=str, default="logs_ly_grid")
     args = parser.parse_args()
 
     random.seed(args.seed)

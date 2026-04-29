@@ -4,6 +4,7 @@
 """
 import json
 import pickle
+from collections import defaultdict
 from math import radians, cos, sin, asin, sqrt
 
 import numpy as np
@@ -205,6 +206,94 @@ def gen_sparse_directed_H_poi_from_sessions(user_sessions_dict, num_pois):
                     tar_poi = session[tar_idx]
                     H[src_poi, tar_poi] = 1.0
     return sp.csr_matrix(H)
+
+
+def gen_weighted_directed_H_poi_from_sessions(user_sessions_with_time_dict, num_pois, step_decay, time_decay):
+    """
+    基于训练 session 构建“固定权重”的有向 POI 转移矩阵。
+
+    设计目标：
+    1. 保持当前项目已有的“源 POI -> 后续 POI”建边思路不变；
+    2. 不再把每条转移边都当作等权 1，而是引入步距与时间差共同决定的固定权重；
+
+    参数说明：
+    - user_sessions_with_time_dict:
+      训练 session 字典。结构约定为：
+      {
+          user_idx: [
+              [(poi_idx, timestamp_seconds), ...],
+              [(poi_idx, timestamp_seconds), ...],
+              ...
+          ]
+      }
+      其中 timestamp_seconds 是预处理阶段提前保存好的 Unix 时间戳（秒）。
+    - num_pois: POI 总数
+    - step_decay: 步距衰减系数 c1
+    - time_decay: 时间差衰减系数 c2
+
+    权重定义：
+        w_ij = exp(- step_decay * step_gap_norm - time_decay * time_gap_norm)
+
+    其中：
+    - step_gap_norm = step_gap / (session_len - 1)
+      即先把步距按当前 session 内的理论最大步距归一化到 (0, 1]；
+    - time_gap_norm = ((t_j - t_i) / 3600) / 24
+      即先把秒级时间差换算为小时，再除以 24 做归一化。
+
+    这样做的动机是：
+    - time_gap_norm 本身已经落在 0 到 1 左右；
+    - 如果 step_gap 仍然直接使用 1、2、3...，那么步距项通常会天然压过时间项；
+    - 先把 step_gap 也缩放到相近范围后，step_decay 与 time_decay 更容易放在同一组网格里比较。
+    """
+    edge_weight_sum = defaultdict(float)
+    edge_count = defaultdict(int)
+
+    for _, sessions in user_sessions_with_time_dict.items():
+        for session in sessions:
+            # 对当前 session 来说，最远的合法步距就是 len(session) - 1。
+            # 这也是步距归一化时使用的分母。
+            max_step_gap = max(len(session) - 1, 1)
+
+            # session 中的每个元素都是 (poi_idx, timestamp_seconds)
+            # 这里仍然保留“连接到所有后续 POI”的原始设计：
+            # 对每个源点，遍历它后面的所有目标点。
+            for src_pos in range(len(session) - 1):
+                src_poi, src_ts = session[src_pos]
+                for tar_pos in range(src_pos + 1, len(session)):
+                    tar_poi, tar_ts = session[tar_pos]
+
+                    # step_gap 表示同一 session 内跨了多少步，越远说明转移越弱。
+                    step_gap = tar_pos - src_pos
+                    # 方案A-2中，先把步距缩放到 0-1 范围，
+                    # 这样它与 time_gap_norm 的量纲更接近，便于共同决定边权。
+                    step_gap_norm = step_gap / max_step_gap
+
+                    # 时间差先由秒转换为小时，再按 24 小时 session 边界归一化到更稳定的量纲。
+                    delta_hour = max((tar_ts - src_ts) / 3600.0, 0.0)
+                    time_gap_norm = delta_hour / 24.0
+
+                    # 方案A使用固定公式直接计算单次转移权重，不在模型训练中更新。
+                    single_weight = np.exp(-step_decay * step_gap_norm - time_decay * time_gap_norm)
+
+                    edge_key = (src_poi, tar_poi)
+                    edge_weight_sum[edge_key] += float(single_weight)
+                    edge_count[edge_key] += 1
+
+    if not edge_weight_sum:
+        return sp.csr_matrix((num_pois, num_pois), dtype=float)
+
+    rows = []
+    cols = []
+    values = []
+    for (src_poi, tar_poi), weight_sum in edge_weight_sum.items():
+        # 同一条转移边可能在多个用户、多个 session 中多次出现。
+        # 这里按已确定的方案，取“单次转移权重的平均值”作为最终边权。
+        avg_weight = weight_sum / edge_count[(src_poi, tar_poi)]
+        rows.append(src_poi)
+        cols.append(tar_poi)
+        values.append(avg_weight)
+
+    return sp.csr_matrix((np.array(values, dtype=float), (rows, cols)), shape=(num_pois, num_pois))
 
 
 def load_meta(meta_path):

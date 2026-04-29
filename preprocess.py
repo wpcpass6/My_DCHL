@@ -295,10 +295,10 @@ def main():
 
     print("[4/5] 生成训练与测试样本...")
     # 训练集滑窗方式
-    # train_samples = build_prefix_samples(train_user_sessions, poi_cat_idx, poi_region_idx)
+    train_samples = build_prefix_samples(train_user_sessions, poi_cat_idx, poi_region_idx)
 
     # 训练集留一方式
-    train_samples = build_train_last_step_samples(train_user_sessions, poi_cat_idx, poi_region_idx)
+    # train_samples = build_train_last_step_samples(train_user_sessions, poi_cat_idx, poi_region_idx)
 
     test_samples = build_last_step_samples(test_user_sessions, poi_cat_idx, poi_region_idx)
 

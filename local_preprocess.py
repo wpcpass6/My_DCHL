@@ -6,6 +6,12 @@ from utils import save_dict_to_pkl, save_list_with_pkl
 
 _GEOHASH_BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
 
+# 固定权重转移图中的两个衰减系数。
+# - step_gap 会先按 session 内理论最大步距归一化到 (0, 1]；
+# - time_gap 会按 delta_hour / 24 归一化到 [0, 1] 左右。
+TRANS_STEP_DECAY = 3
+TRANS_TIME_DECAY = 0
+
 
 def geohash_encode(latitude, longitude, precision=6):
     """使用纯 Python 实现 geohash 编码，避免额外依赖。"""
@@ -166,6 +172,35 @@ def remap_sessions_for_users(user_ids, user_sessions_raw, user2idx, poi2idx):
     return remapped
 
 
+def remap_sessions_with_time_for_users(user_ids, user_sessions_raw, user2idx, poi2idx):
+    """
+    将训练/测试 session 重映射为“带时间信息”的整数序列。
+    输出结构：
+    {
+        user_idx: [
+            [(poi_idx, timestamp_seconds), ...],
+            ...
+        ]
+    }
+
+    其中 timestamp_seconds 是 Unix 时间戳（秒）。之所以提前转成数值，是为了：
+    - 后续构图阶段直接做减法即可得到时间差；
+    - 避免在 dataset 阶段重复处理 datetime 对象。
+    """
+    remapped = {}
+    for raw_user in user_ids:
+        user_idx = user2idx[raw_user]
+        timed_sessions = []
+        for session in user_sessions_raw[raw_user]:
+            timed_session = []
+            for timestamp, poi_id, _, _, _ in session:
+                poi_idx = poi2idx[poi_id]
+                timed_session.append((poi_idx, timestamp.timestamp()))
+            timed_sessions.append(timed_session)
+        remapped[user_idx] = timed_sessions
+    return remapped
+
+
 def build_prefix_samples(remapped_sessions, poi_cat_idx, poi_region_idx):
     """训练阶段：滑窗，将每个 session 展开为 prefix -> next POI。"""
     samples = []
@@ -309,6 +344,17 @@ def main():
     train_user_sessions = remap_sessions_for_users(valid_users, train_user_sessions_raw, user2idx, poi2idx)
     test_user_sessions = remap_sessions_for_users(valid_users, test_user_sessions_raw, user2idx, poi2idx)
 
+    # 方案A额外保存“带时间的训练 session”。
+    # 这份文件不直接用于样本训练，而是专门供 dataset.py 在构造固定加权转移图时读取：
+    # - 步距来自 session 内的位置差；
+    # - 时间差来自这里保存的 timestamp。
+    train_user_sessions_with_time = remap_sessions_with_time_for_users(
+        valid_users,
+        train_user_sessions_raw,
+        user2idx,
+        poi2idx,
+    )
+
     # ===== 与 preprocess.py 的不同部分 1：只保留训练集 POI 的类别边/区域边 =====
     # 说明：这里仍然保留全局 num_categories 和 num_regions，只裁剪 POI->语义节点的边。
     train_poi_set = collect_train_pois(train_user_sessions)
@@ -343,10 +389,13 @@ def main():
         "num_test_sessions": total_test_sessions,
         "num_train_samples": len(train_samples),
         "num_test_samples": len(test_samples),
-        "train_protocol": "last_step_only",
+        "train_protocol": "sliding_window",
         "test_protocol": "last_step_only",
         # ===== 与 preprocess.py 的不同部分 2：明确记录语义图构造口径 =====
         "semantic_graph_protocol": "train_poi_only_edges",
+        # 方案A固定权重转移图的两个超参数直接记录到 meta，方便 dataset.py 读取并复现。
+        "trans_step_decay": TRANS_STEP_DECAY,
+        "trans_time_decay": TRANS_TIME_DECAY,
     }
 
     print("[5/5] 保存文件...")
@@ -354,6 +403,8 @@ def main():
     save_list_with_pkl(os.path.join(args.output_dir, "test_samples.pkl"), test_samples)
     save_dict_to_pkl(os.path.join(args.output_dir, "train_user_sessions.pkl"), train_user_sessions)
     save_dict_to_pkl(os.path.join(args.output_dir, "test_user_sessions.pkl"), test_user_sessions)
+    # 这份文件只给方案A的固定加权转移图使用，不影响协同图和样本构造流程。
+    save_dict_to_pkl(os.path.join(args.output_dir, "train_user_sessions_with_time.pkl"), train_user_sessions_with_time)
     save_dict_to_pkl(os.path.join(args.output_dir, "poi_coos.pkl"), poi_coos_idx)
 
     # ===== 与 preprocess.py 的不同部分 3：输出同名文件，但内容改为训练集局部语义边 =====

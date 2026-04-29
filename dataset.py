@@ -1,3 +1,4 @@
+import os
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
@@ -8,6 +9,7 @@ from utils import (
     gen_sparse_H_poi_region,
     gen_sparse_H_user,
     gen_sparse_directed_H_poi_from_sessions,
+    gen_weighted_directed_H_poi_from_sessions,
     get_hyper_deg,
     get_user_complete_traj,
     get_user_reverse_traj,
@@ -22,6 +24,8 @@ class HDCHLBDataset(Dataset):
         self.samples = load_list_with_pkl(samples_filename)
         self.meta = load_dict_from_pkl(f"{data_dir}/meta.pkl")
         self.train_user_sessions = load_dict_from_pkl(f"{data_dir}/train_user_sessions.pkl")
+        timed_sessions_path = f"{data_dir}/train_user_sessions_with_time.pkl"
+        self.train_user_sessions_with_time = load_dict_from_pkl(timed_sessions_path) if os.path.exists(timed_sessions_path) else None
         self.poi_category_dict = load_dict_from_pkl(f"{data_dir}/poi_category.pkl")
         self.poi_region_dict = load_dict_from_pkl(f"{data_dir}/poi_region.pkl")
         self.num_regions = max(self.poi_region_dict.values()) + 1 if self.poi_region_dict else 0
@@ -33,6 +37,8 @@ class HDCHLBDataset(Dataset):
         self.keep_rate = args.keep_rate
         self.keep_rate_poi = args.keep_rate_poi
         self.device = device
+        self.trans_step_decay = self.meta.get("trans_step_decay")
+        self.trans_time_decay = self.meta.get("trans_time_decay")
 
         # 图结构统一基于训练阶段历史构建，避免测试 session 泄漏进结构分支。
         self.users_trajs_dict, self.users_trajs_lens_dict = get_user_complete_traj(self.train_user_sessions)
@@ -67,8 +73,26 @@ class HDCHLBDataset(Dataset):
         self.Deg_H_cp = get_hyper_deg(self.H_cp)
         self.HG_cp = transform_csr_matrix_to_tensor(self.Deg_H_cp * self.H_cp).to(device)
 
-        # 转移图也仅从训练 session 内部构建，避免跨 session 建边。
-        self.H_poi_src = gen_sparse_directed_H_poi_from_sessions(self.train_user_sessions, self.num_pois)
+        # 转移图仅从训练 session 内部构建，避免跨 session 建边。
+        # “固定权重转移图”：
+        # - 边src -> 所有后续 tar；
+        # - 同一 (src, tar) 多次出现时取平均；
+        # - 边权由步距与时间差共同决定。
+        # meta 中不存在对应超参数，则自动退回到原始二值转移图
+        if (
+            self.trans_step_decay is not None
+            and self.trans_time_decay is not None
+            and self.train_user_sessions_with_time is not None
+        ):
+            self.H_poi_src = gen_weighted_directed_H_poi_from_sessions(
+                self.train_user_sessions_with_time,
+                self.num_pois,
+                self.trans_step_decay,
+                self.trans_time_decay,
+            )
+        else:
+            self.H_poi_src = gen_sparse_directed_H_poi_from_sessions(self.train_user_sessions, self.num_pois)
+
         self.H_poi_src = csr_matrix_drop_edge(self.H_poi_src, self.keep_rate_poi)
         self.Deg_H_poi_src = get_hyper_deg(self.H_poi_src)
         self.HG_poi_src = transform_csr_matrix_to_tensor(self.Deg_H_poi_src * self.H_poi_src).to(device)
